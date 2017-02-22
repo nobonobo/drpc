@@ -2,19 +2,26 @@ package node
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/rpc"
 	"net/rpc/jsonrpc"
 
 	"golang.org/x/net/websocket"
 
+	"time"
+
+	"github.com/nobonobo/drpc"
 	"github.com/nobonobo/drpc/rpcutil"
 	"github.com/nobonobo/drpc/services"
+	"github.com/nobonobo/drpc/services/naming"
 )
 
 // Server ...
 type Server struct {
 	*rpc.Server
+	done        chan struct{}
+	act         chan struct{}
 	registory   *services.Registory
 	selfAddr    string
 	peers       *rpcutil.Peers
@@ -27,14 +34,16 @@ func New(selfAddr string) (*Server, error) {
 	s := new(Server)
 	factory := func(addr string) (*rpc.Client, error) {
 		if selfAddr == addr {
-			return DefaultLocalFactory(s)
+			return drpc.DefaultLocalFactory(s)
 		}
-		return DefaultRemoteFactory(addr)
+		return drpc.DefaultRemoteFactory(addr)
 	}
 	s.Server = rpc.NewServer()
+	s.done = make(chan struct{})
+	s.act = make(chan struct{})
 	s.registory = services.NewRegistory()
 	s.selfAddr = selfAddr
-	s.peers = rpcutil.NewPeers(DefaultMaxConns, factory)
+	s.peers = rpcutil.NewPeers(drpc.DefaultMaxConns, factory)
 	s.httpHandler = websocket.Handler(s.handle)
 	if err := s.Join(s.SelfAddr()); err != nil {
 		return nil, err
@@ -42,6 +51,33 @@ func New(selfAddr string) (*Server, error) {
 	if err := s.Register(s); err != nil {
 		return nil, err
 	}
+	go func() {
+		tm := time.NewTimer(drpc.DefaultHertbeatInterval)
+		failed := 0
+		action := func() {
+			if err := s.activate(); err != nil {
+				failed++
+				log.Println("activate failed:", err)
+			} else {
+				failed = 0
+			}
+			d := drpc.DefaultHertbeatInterval * time.Duration(failed+1)
+			if d > drpc.DefaultHertbeatMax {
+				d = drpc.DefaultHertbeatMax
+			}
+			tm.Reset(d)
+		}
+		for {
+			select {
+			case <-s.done:
+				return
+			case <-s.act:
+				action()
+			case <-tm.C:
+				action()
+			}
+		}
+	}()
 	return s, nil
 }
 
@@ -107,6 +143,7 @@ func (s *Server) Get(addr, service string) (rpcutil.Client, error) {
 
 // Close ...
 func (s *Server) Close() error {
+	close(s.done)
 	return s.peers.LeaveAll()
 }
 
@@ -160,4 +197,28 @@ func (s *Server) handle(ws *websocket.Conn) {
 // ServeHTTP ...
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s.httpHandler.ServeHTTP(w, req)
+}
+
+// === for Hertbeat ===
+
+func (s *Server) activate() error {
+	svcs, err := s.GetServices("NamingService")
+	if err != nil {
+		return fmt.Errorf("naming service connect failed: %s", err)
+	}
+	defer svcs.Close()
+	for _, svc := range svcs {
+		if err := svc.Call("Register", naming.RegisterInfo{
+			Addr:     s.SelfAddr(),
+			Provides: s.Provides(),
+		}, &struct{}{}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Activate ...
+func (s *Server) Activate() {
+	s.act <- struct{}{}
 }

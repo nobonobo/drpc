@@ -1,10 +1,13 @@
-package drpc
+package tests
 
 import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"time"
+
+	"github.com/nobonobo/drpc"
 	"github.com/nobonobo/drpc/rpcutil"
 	"github.com/nobonobo/drpc/services/naming"
 	"github.com/nobonobo/drpc/services/node"
@@ -33,13 +36,15 @@ func newTestNodes(num int) (testNodes, error) {
 			nodes.Close()
 			return nil, err
 		}
-		mux.Handle(node.DefaultURLPath, n)
+		mux.Handle(drpc.DefaultURLPath, n)
 		nodes = append(nodes, &testNode{Server: n, ts: ts})
 	}
 	return nodes, nil
 }
 
 func TestNormal(t *testing.T) {
+	drpc.DefaultHertbeatInterval = 100 * time.Millisecond
+	drpc.DefaultHertbeatMax = 300 * time.Millisecond
 	nodes, err := newTestNodes(3)
 	if err != nil {
 		t.Log(err)
@@ -69,6 +74,7 @@ func TestNormal(t *testing.T) {
 		defer c.Close()
 		t.Log(c.Call("Invite", master.SelfAddr(), &struct{}{}))
 	}
+	time.Sleep(10 * time.Millisecond)
 	svcs, err := master.GetServices("NodeService")
 	if err != nil {
 		t.Log(err)
